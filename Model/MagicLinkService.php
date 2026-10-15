@@ -31,9 +31,6 @@ class MagicLinkService implements MagicLinkServiceInterface
 {
     private const EMAIL_TEMPLATE_ID = 'muon_passwordlesslogin_magic_link';
 
-    /** Number of seconds in the rate-limit sliding window (1 hour). */
-    private const RATE_LIMIT_WINDOW_SECONDS = 3600;
-
     /**
      * @param \Magento\Customer\Api\CustomerRepositoryInterface    $customerRepository
      * @param \Muon\PasswordlessLogin\Api\TokenRepositoryInterface $tokenRepository
@@ -85,7 +82,7 @@ class MagicLinkService implements MagicLinkServiceInterface
 
         $windowStart = $this->dateTime->gmtDate(
             'Y-m-d H:i:s',
-            time() - self::RATE_LIMIT_WINDOW_SECONDS
+            time() - Config::RATE_LIMIT_WINDOW_SECONDS
         );
         $recentCount = $this->tokenRepository->countRecentByCustomerId((int)$customer->getId(), $windowStart);
 
@@ -94,9 +91,10 @@ class MagicLinkService implements MagicLinkServiceInterface
             return;
         }
 
-        // Invalidate any outstanding unused tokens before issuing a new one, so that
-        // previously delivered links cannot be replayed after this request.
-        $this->tokenRepository->deleteUnusedByCustomerId((int)$customer->getId());
+        // Invalidate any outstanding unused tokens before issuing a new one, so previously
+        // delivered links cannot be replayed. Marked as consumed (not deleted) so the rows
+        // still count toward the per-hour rate limit, which keys on created_at (H-1).
+        $this->tokenRepository->markSupersededByCustomerId((int)$customer->getId());
 
         $rawToken = bin2hex(random_bytes(32));
         $hashedToken = hash('sha256', $rawToken);
@@ -184,7 +182,6 @@ class MagicLinkService implements MagicLinkServiceInterface
      * @param int    $lifetime
      *
      * @return void
-     * @throws \Magento\Framework\Exception\LocalizedException
      */
     private function dispatchEmail(string $email, string $customerName, string $magicLink, int $lifetime): void
     {
@@ -209,11 +206,13 @@ class MagicLinkService implements MagicLinkServiceInterface
 
             $transport->sendMessage();
         } catch (\Exception $e) {
+            // Log transport failures but do not surface them to the caller. A distinguishable
+            // error on a registered address would defeat the anti-enumeration guarantee: the
+            // request controller always shows the same generic message regardless of outcome (M-1).
             $this->logger->error(
                 'Muon_PasswordlessLogin: failed to send magic link email.',
                 ['exception' => $e, 'email_hash' => hash('sha256', $email)],
             );
-            throw new LocalizedException(__('Unable to send the login link. Please try again later.'), $e);
         }
     }
 }

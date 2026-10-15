@@ -62,7 +62,23 @@ interface TokenRepositoryInterface
     public function deleteUnusedByCustomerId(int $customerId): void;
 
     /**
-     * Delete all expired tokens and all consumed tokens.
+     * Mark all unused (not yet consumed) tokens for the given customer as superseded.
+     *
+     * Stamps used_at on still-valid links so they can no longer authenticate, while
+     * preserving the rows so the per-hour rate-limit count (which keys on created_at)
+     * stays accurate. Called before issuing a new token instead of physically deleting,
+     * which would erase the rows the rate limiter counts.
+     *
+     * @param int $customerId
+     * @return void
+     * @throws \Magento\Framework\Exception\CouldNotSaveException
+     */
+    public function markSupersededByCustomerId(int $customerId): void;
+
+    /**
+     * Delete expired and consumed tokens created before the rate-limit window.
+     *
+     * Rows inside the window are kept, expired or not, because the per-hour rate limit counts them.
      *
      * @return void
      * @throws \Magento\Framework\Exception\CouldNotDeleteException

@@ -142,4 +142,59 @@ class TokenRepositoryTest extends TestCase
 
         $this->subject->deleteUnusedByCustomerId(42);
     }
+
+    public function testMarkSupersededByCustomerIdStampsUsedAtOnUnusedRows(): void
+    {
+        $connection = $this->createMock(\Magento\Framework\DB\Adapter\AdapterInterface::class);
+        $connection->expects($this->once())
+            ->method('update')
+            ->with(
+                'muon_passwordless_login_token',
+                self::callback(static fn (array $bind): bool => ($bind['used_at'] ?? null) === '2026-05-29 10:00:00'),
+                self::callback(static fn (array $cond): bool => in_array('used_at IS NULL', $cond, true))
+            )
+            ->willReturn(2);
+        $this->resource->method('getConnection')->willReturn($connection);
+        $this->resource->method('getMainTable')->willReturn('muon_passwordless_login_token');
+        $this->dateTime->method('gmtDate')->willReturn('2026-05-29 10:00:00');
+
+        $this->subject->markSupersededByCustomerId(42);
+    }
+
+    /**
+     * Cleanup ran hourly and deleted every expired or consumed row, including rows the per-hour rate
+     * limit was still counting, so the limit reset on each run. Only rows older than the window may go.
+     */
+    public function testRegressionDeleteExpiredKeepsRowsTheRateLimitStillCounts(): void
+    {
+        $windowInput = null;
+        $this->dateTime->method('gmtDate')->willReturnCallback(
+            static function (string $format, ?int $input = null) use (&$windowInput): string {
+                self::assertSame('Y-m-d H:i:s', $format);
+                if ($input === null) {
+                    return '2026-10-15 12:00:00';
+                }
+                $windowInput = $input;
+                return '2026-10-15 11:00:00';
+            }
+        );
+
+        $connection = $this->createMock(\Magento\Framework\DB\Adapter\AdapterInterface::class);
+        $connection->expects($this->once())
+            ->method('delete')
+            ->with(
+                'muon_passwordless_login_token',
+                [
+                    'created_at < ?' => '2026-10-15 11:00:00',
+                    'expires_at < ? OR used_at IS NOT NULL' => '2026-10-15 12:00:00',
+                ]
+            );
+        $this->resource->method('getConnection')->willReturn($connection);
+        $this->resource->method('getMainTable')->willReturn('muon_passwordless_login_token');
+
+        $this->subject->deleteExpired();
+
+        // A literal hour, not Config::RATE_LIMIT_WINDOW_SECONDS: this pins the window itself.
+        self::assertEqualsWithDelta(time() - 3600, $windowInput, 5);
+    }
 }
